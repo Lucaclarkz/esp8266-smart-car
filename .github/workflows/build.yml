@@ -1,0 +1,41 @@
+name: Build ESP8266 Firmware
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+
+    - uses: actions/checkout@v4
+
+    - name: Setup Arduino CLI
+      uses: arduino/setup-arduino-cli@v2
+
+    - name: Install ESP8266 core
+      run: |
+        arduino-cli config init
+        arduino-cli config add board_manager.additional_urls http://arduino.esp8266.com/stable/package_esp8266com_index.json
+        arduino-cli core update-index
+        arduino-cli core install esp8266:esp8266
+
+    - name: Install Servo library
+      run: arduino-cli lib install Servo
+
+    - name: Compile
+      run: |
+        mkdir build
+        arduino-cli compile \
+          --fqbn esp8266:esp8266:nodemcuv2 \
+          --output-dir build \
+          .
+
+    - name: Upload BIN
+      uses: actions/upload-artifact@v4
+      with:
+        name: firmware
+        path: build
