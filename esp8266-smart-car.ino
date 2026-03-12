@@ -2,694 +2,400 @@
 #include <ESP8266WebServer.h>
 #include <Servo.h>
 
-// =====================================================
-// ESP8266 NodeMCU Smart Car Final
-// Manual mode  -> no sensors
-// Auto mode    -> front/back cliff IR + ultrasonic + servo scan
-// =====================================================
-
-// ---------------- WiFi AP ----------------
+// ---------------- WIFI ----------------
 const char* ssid = "ESP8266_Car";
-const char* password = "password123";
+const char* password = "12345678";
 
-// ---------------- Server / Servo ---------
 ESP8266WebServer server(80);
 Servo myServo;
 
-// ---------------- Pin Mapping ------------
-const uint8_t IN1 = D8;   // GPIO15
-const uint8_t IN2 = D7;   // GPIO13
-const uint8_t IN3 = D4;   // GPIO2
-const uint8_t IN4 = D3;   // GPIO0
-const uint8_t ENA = D5;   // GPIO14
-const uint8_t ENB = D6;   // GPIO12
+// ---------------- MOTOR PINS ----------------
+int in1 = D8;
+int in2 = D7;
+int in3 = D4;
+int in4 = D3;
 
-const uint8_t FRONT_IR = D1;   // front left+right IR combined
-const uint8_t BACK_IR  = D2;   // back left+right IR combined
+int ena = D5;
+int enb = D6;
 
-const uint8_t SERVO_PIN = D0;  // GPIO16
+// ---------------- SENSORS ----------------
+int frontIR = D1;
+int backIR = D2;
 
-// User-requested ultrasonic mapping
-const uint8_t TRIG_PIN = 3;    // RX / GPIO3
-const uint8_t ECHO_PIN = 1;    // TX / GPIO1
+int trig = 3;   // RX
+int echo = 1;   // TX
 
-// ---------------- Runtime State ----------
+int servoPin = D0;
+
+// ---------------- VARIABLES ----------------
 int carSpeed = 255;
 bool autoMode = false;
-bool servoTestEnabled = false;
-String currentMove = "stop";
-int servoAngle = 90;
-long lastDistance = 999;
-unsigned long lastAutoTick = 0;
 
-// ---------------- Tuning -----------------
-const int SAFE_DISTANCE = 24;
-const int SERVO_LEFT = 160;
-const int SERVO_CENTER = 90;
-const int SERVO_RIGHT = 20;
+const int SAFE_DISTANCE = 25;
 
-const int BACKUP_TIME_SHORT = 250;
-const int BACKUP_TIME_LONG  = 420;
-const int TURN_TIME_SHORT   = 320;
-const int TURN_TIME_LONG    = 430;
+// IR detect state (change HIGH if needed)
+const int IR_ACTIVE_STATE = LOW;
 
-// IMPORTANT:
-// If your cliff sensor outputs HIGH when edge/cliff is detected,
-// keep HIGH.
-// If it outputs LOW when edge/cliff is detected, change to LOW.
-const int IR_ACTIVE_STATE = HIGH;
-
-// PWM frequency:
-// Higher frequency can reduce audible whining,
-// but too high can reduce torque depending on motor/driver.
-// Try 18000 first. If power feels weak, try 15000 or 12000.
-const int MOTOR_PWM_FREQ = 12000;
 
 // =====================================================
-// Motor control
+// MOTOR CONTROL
 // =====================================================
-void setMotor(bool a1, bool a2, bool b1, bool b2, int spdA, int spdB) {
-  spdA = constrain(spdA, 0, 255);
-  spdB = constrain(spdB, 0, 255);
 
-  analogWrite(ENA, spdA);
-  analogWrite(ENB, spdB);
+void setMotor(bool a,bool b,bool c,bool d){
 
-  digitalWrite(IN1, a1);
-  digitalWrite(IN2, a2);
-  digitalWrite(IN3, b1);
-  digitalWrite(IN4, b2);
+analogWrite(ena,carSpeed);
+analogWrite(enb,carSpeed);
+
+digitalWrite(in1,a);
+digitalWrite(in2,b);
+digitalWrite(in3,c);
+digitalWrite(in4,d);
+
 }
 
-void stopCar() {
-  setMotor(LOW, LOW, LOW, LOW, 0, 0);
-  currentMove = "stop";
+void stopCar(){
+setMotor(0,0,0,0);
 }
 
-void moveForward() {
-  setMotor(HIGH, LOW, HIGH, LOW, carSpeed, carSpeed);
-  currentMove = "forward";
+void forward(){
+setMotor(1,0,1,0);
 }
 
-void moveBackward() {
-  setMotor(LOW, HIGH, LOW, HIGH, carSpeed, carSpeed);
-  currentMove = "backward";
+void backward(){
+setMotor(0,1,0,1);
 }
 
-void turnLeft() {
-  setMotor(LOW, HIGH, HIGH, LOW, carSpeed, carSpeed);
-  currentMove = "left";
+// swapped to fix direction
+void left(){
+setMotor(1,0,0,1);
 }
 
-void turnRight() {
-  setMotor(HIGH, LOW, LOW, HIGH, carSpeed, carSpeed);
-  currentMove = "right";
+void right(){
+setMotor(0,1,1,0);
 }
 
-// Optional softer turns for future tuning
-void turnLeftSoft() {
-  setMotor(HIGH, LOW, HIGH, LOW, carSpeed / 2, carSpeed);
-  currentMove = "left";
-}
-
-void turnRightSoft() {
-  setMotor(HIGH, LOW, HIGH, LOW, carSpeed, carSpeed / 2);
-  currentMove = "right";
-}
 
 // =====================================================
-// Servo
+// ULTRASONIC
 // =====================================================
-void setServoSafe(int angle) {
-  angle = constrain(angle, 10, 170);
-  servoAngle = angle;
-  myServo.write(servoAngle);
+
+long readDistance(){
+
+digitalWrite(trig,LOW);
+delayMicroseconds(5);
+
+digitalWrite(trig,HIGH);
+delayMicroseconds(10);
+digitalWrite(trig,LOW);
+
+long duration=pulseIn(echo,HIGH,30000);
+
+if(duration==0)return 999;
+
+long dist=duration*0.034/2;
+
+return dist;
+
 }
 
-void centerServo() {
-  setServoSafe(SERVO_CENTER);
-}
-
-// =====================================================
-// Sensors
-// =====================================================
-bool frontCliffDetected() {
-  return digitalRead(FRONT_IR) == IR_ACTIVE_STATE;
-}
-
-bool backCliffDetected() {
-  return digitalRead(BACK_IR) == IR_ACTIVE_STATE;
-}
-
-long readDistanceCM() {
-  digitalWrite(TRIG_PIN, LOW);
-  delayMicroseconds(3);
-
-  digitalWrite(TRIG_PIN, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(TRIG_PIN, LOW);
-
-  unsigned long duration = pulseIn(ECHO_PIN, HIGH, 26000UL);
-  if (duration == 0) {
-    lastDistance = 999;
-    return 999;
-  }
-
-  long dist = (long)(duration * 0.0343 / 2.0);
-  if (dist <= 0) dist = 999;
-  lastDistance = dist;
-  return dist;
-}
-
-long scanAt(int angle) {
-  setServoSafe(angle);
-  delay(350);
-
-  long d1 = readDistanceCM();
-  delay(35);
-  long d2 = readDistanceCM();
-
-  if (d1 == 999 && d2 == 999) return 999;
-  if (d1 == 999) return d2;
-  if (d2 == 999) return d1;
-  return (d1 + d2) / 2;
-}
 
 // =====================================================
-// Auto Mode Logic
+// AUTO MODE
 // =====================================================
-void chooseTurnByScan() {
-  long leftDist  = scanAt(SERVO_LEFT);
-  long rightDist = scanAt(SERVO_RIGHT);
 
-  centerServo();
-  delay(50);
+void autoDrive(){
 
-  if (leftDist > rightDist) {
-    turnLeft();
-    delay(TURN_TIME_SHORT);
-  } else {
-    turnRight();
-    delay(TURN_TIME_SHORT);
-  }
+bool frontCliff=digitalRead(frontIR)==IR_ACTIVE_STATE;
+bool backCliff=digitalRead(backIR)==IR_ACTIVE_STATE;
 
-  stopCar();
-  delay(60);
+long distance=readDistance();
+
+
+// cliff detect
+if(frontCliff){
+
+stopCar();
+delay(200);
+
+if(!backCliff){
+
+backward();
+delay(350);
+
 }
 
-void obstacleAvoidRoutine() {
-  stopCar();
-  delay(70);
+stopCar();
+delay(100);
 
-  if (!backCliffDetected()) {
-    moveBackward();
-    delay(BACKUP_TIME_SHORT);
-    stopCar();
-    delay(70);
-  }
+left();
+delay(350);
 
-  long leftDist   = scanAt(SERVO_LEFT);
-  long centerDist = scanAt(SERVO_CENTER);
-  long rightDist  = scanAt(SERVO_RIGHT);
+stopCar();
 
-  centerServo();
-  delay(50);
+return;
 
-  if (leftDist > rightDist && leftDist > SAFE_DISTANCE) {
-    turnLeft();
-    delay(TURN_TIME_SHORT);
-  }
-  else if (rightDist >= leftDist && rightDist > SAFE_DISTANCE) {
-    turnRight();
-    delay(TURN_TIME_SHORT);
-  }
-  else if (centerDist > SAFE_DISTANCE) {
-    moveForward();
-    delay(180);
-  }
-  else {
-    if (!backCliffDetected()) {
-      moveBackward();
-      delay(BACKUP_TIME_LONG);
-      stopCar();
-      delay(70);
-    }
-    turnRight();
-    delay(TURN_TIME_LONG);
-  }
-
-  stopCar();
-  delay(60);
 }
 
-void frontCliffRoutine() {
-  stopCar();
-  delay(70);
 
-  if (!backCliffDetected()) {
-    moveBackward();
-    delay(340);
-    stopCar();
-    delay(70);
-  }
+// obstacle detect
+if(distance<SAFE_DISTANCE){
 
-  chooseTurnByScan();
+stopCar();
+delay(200);
+
+backward();
+delay(300);
+
+stopCar();
+delay(200);
+
+// scan left
+myServo.write(160);
+delay(350);
+
+long leftDist=readDistance();
+
+// scan right
+myServo.write(20);
+delay(350);
+
+long rightDist=readDistance();
+
+myServo.write(90);
+
+if(leftDist>rightDist){
+
+left();
+delay(350);
+
+}else{
+
+right();
+delay(350);
+
 }
 
-void rearCliffWhileBackingRoutine() {
-  stopCar();
-  delay(60);
+stopCar();
+return;
 
-  moveForward();
-  delay(220);
-
-  stopCar();
-  delay(60);
-
-  chooseTurnByScan();
 }
 
-void autoDriving() {
-  if (millis() - lastAutoTick < 80) return;
-  lastAutoTick = millis();
 
-  bool frontCliff = frontCliffDetected();
-  bool rearCliff  = backCliffDetected();
-  long dist = readDistanceCM();
+// normal drive
+forward();
 
-  if (frontCliff) {
-    frontCliffRoutine();
-    return;
-  }
-
-  if (dist < SAFE_DISTANCE) {
-    obstacleAvoidRoutine();
-    return;
-  }
-
-  if (rearCliff && currentMove == "backward") {
-    rearCliffWhileBackingRoutine();
-    return;
-  }
-
-  centerServo();
-  moveForward();
 }
+
+
 
 // =====================================================
-// Web UI
+// WEB PAGE
 // =====================================================
-String htmlPage() {
-  return R"rawliteral(
+
+String webpage(){
+
+String page = R"====(
 <!DOCTYPE html>
 <html>
 <head>
-<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
-<title>ESP8266 Smart Car</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
 <style>
-:root{
-  --bg:#ececec;
-  --orange:#f5a623;
-  --green:#1db954;
-}
-*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+
 body{
-  margin:0;
-  background:var(--bg);
-  font-family:Arial,Helvetica,sans-serif;
-  text-align:center;
-}
-.wrap{
-  max-width:430px;
-  margin:0 auto;
-  padding:16px 12px 28px;
-}
-.title{
-  font-size:26px;
-  font-weight:bold;
-  margin:6px 0 14px;
-}
-.card{
-  background:#fff;
-  border-radius:22px;
-  padding:14px;
-  margin-bottom:14px;
-  box-shadow:0 8px 20px rgba(0,0,0,.08);
-}
-.toprow{
-  display:flex;
-  gap:8px;
-  justify-content:center;
-  flex-wrap:wrap;
-  margin-bottom:10px;
-}
-.badge{
-  background:#f2f2f2;
-  padding:8px 12px;
-  border-radius:999px;
-  font-size:13px;
-  font-weight:bold;
-}
-.layout{
-  display:flex;
-  justify-content:center;
-  align-items:center;
-  gap:18px;
-}
-.remote{
-  position:relative;
-  width:290px;
-  height:290px;
-  border-radius:34px;
-  background:linear-gradient(180deg,#2b2b2f,#111);
-  box-shadow:0 12px 24px rgba(0,0,0,.18);
-}
-.ring{
-  position:absolute;
-  inset:26px;
-  border-radius:50%;
-  background:radial-gradient(circle at 30% 25%, #767682, #4d4d56 58%, #34343b 100%);
-  box-shadow:inset 0 2px 6px rgba(255,255,255,.10), inset 0 -6px 12px rgba(0,0,0,.25);
-}
-.btnDir{
-  position:absolute;
-  width:68px;
-  height:68px;
-  border:none;
-  border-radius:50%;
-  background:transparent;
-  color:#fff;
-  font-size:42px;
-  font-weight:bold;
-}
-.btnDir:active{transform:scale(.96)}
-.up{left:50%; top:26px; transform:translateX(-50%)}
-.down{left:50%; bottom:26px; transform:translateX(-50%)}
-.left{left:16px; top:50%; transform:translateY(-50%)}
-.right{right:16px; top:50%; transform:translateY(-50%)}
-
-.autoBtn{
-  position:absolute;
-  left:50%;
-  top:50%;
-  width:76px;
-  height:76px;
-  margin-left:-38px;
-  margin-top:-38px;
-  border:none;
-  border-radius:50%;
-  background:radial-gradient(circle at 35% 30%, #2a2a2f, #121214);
-  color:#fff;
-  font-size:17px;
-  font-weight:bold;
-  box-shadow:0 2px 8px rgba(0,0,0,.35);
-}
-.autoBtn.on{
-  outline:3px solid var(--orange);
+font-family:Arial;
+text-align:center;
+background:#eee;
 }
 
-.speedWrap{
-  width:78px;
-  background:#fff;
-  border-radius:18px;
-  padding:10px 0;
-  box-shadow:0 8px 20px rgba(0,0,0,.08);
+button{
+width:80px;
+height:80px;
+font-size:30px;
+border-radius:40px;
+margin:8px;
 }
-.speedTitle{font-size:13px;font-weight:bold;color:#444;margin-bottom:6px}
-#speedVal{font-size:20px;font-weight:bold;margin-top:4px}
-input[type=range].vertical{
-  writing-mode:bt-lr;
-  -webkit-appearance:slider-vertical;
-  width:36px;
-  height:190px;
+
+.auto{
+background:orange;
+width:100px;
+height:100px;
 }
-.row{
-  display:flex;
-  gap:10px;
-  justify-content:center;
-  flex-wrap:wrap;
-}
-.btn{
-  border:none;
-  border-radius:14px;
-  padding:12px 16px;
-  background:#202020;
-  color:#fff;
-  font-size:14px;
-  font-weight:bold;
-}
-.btn.gray{background:#e0e0e0;color:#111}
-.btn.green{background:var(--green)}
-.slider{
-  width:100%;
-  max-width:280px;
-}
-.note{
-  font-size:12px;
-  color:#666;
-  margin-top:8px;
-}
+
 </style>
+
 </head>
+
 <body>
-<div class="wrap">
-  <div class="title">ESP8266 Smart Car</div>
 
-  <div class="card">
-    <div class="toprow">
-      <div id="modeBadge" class="badge">AUTO: OFF</div>
-      <div id="moveBadge" class="badge">MOVE: STOP</div>
-      <div id="distBadge" class="badge">DIST: -- cm</div>
-    </div>
+<h2>ESP8266 SMART CAR</h2>
 
-    <div class="layout">
-      <div class="remote">
-        <div class="ring"></div>
+<div>
 
-        <button class="btnDir up" onmousedown="holdStart('forward')" ontouchstart="holdStart('forward')" onmouseup="holdStop()" ontouchend="holdStop()">&#708;</button>
-        <button class="btnDir left" onmousedown="holdStart('left')" ontouchstart="holdStart('left')" onmouseup="holdStop()" ontouchend="holdStop()">&#706;</button>
-        <button id="autoBtn" class="autoBtn" onclick="send('toggle_auto')">AUTO</button>
-        <button class="btnDir right" onmousedown="holdStart('right')" ontouchstart="holdStart('right')" onmouseup="holdStop()" ontouchend="holdStop()">&#707;</button>
-        <button class="btnDir down" onmousedown="holdStart('backward')" ontouchstart="holdStart('backward')" onmouseup="holdStop()" ontouchend="holdStop()">&#709;</button>
-      </div>
+<button 
+onmousedown="cmd('forward')" 
+onmouseup="cmd('stop')">↑</button>
 
-      <div class="speedWrap">
-        <div class="speedTitle">SPEED</div>
-        <input id="speed" class="vertical" type="range" min="120" max="255" value="255" oninput="speedLive(this.value)" onchange="setSpeed(this.value)">
-        <div id="speedVal">255</div>
-      </div>
-    </div>
-    <div class="note">Manual mode ignores sensors. Auto mode uses IR + ultrasonic + servo.</div>
-  </div>
-
-  <div class="card">
-    <div style="font-weight:bold;margin-bottom:10px;">Servo Test (Manual Mode)</div>
-    <div class="row">
-      <button id="servoTestBtn" class="btn gray" onclick="send('toggle_servo_test')">Servo Test OFF</button>
-      <button class="btn" onclick="setServo(20)">Left</button>
-      <button class="btn" onclick="setServo(90)">Center</button>
-      <button class="btn" onclick="setServo(160)">Right</button>
-    </div>
-    <div style="margin-top:12px;">
-      <input id="servoSlider" class="slider" type="range" min="10" max="170" value="90" oninput="servoLive(this.value)" onchange="setServo(this.value)">
-      <div id="servoVal" style="margin-top:8px;font-weight:bold;">Servo: 90°</div>
-    </div>
-    <div class="note">Servo test only works in manual mode.</div>
-  </div>
 </div>
 
+<div>
+
+<button 
+onmousedown="cmd('left')" 
+onmouseup="cmd('stop')">←</button>
+
+<button class="auto"
+onclick="cmd('auto')">AUTO</button>
+
+<button 
+onmousedown="cmd('right')" 
+onmouseup="cmd('stop')">→</button>
+
+</div>
+
+<div>
+
+<button 
+onmousedown="cmd('backward')" 
+onmouseup="cmd('stop')">↓</button>
+
+</div>
+
+<br>
+
+Speed
+
+<br>
+
+<input type="range"
+min="120"
+max="255"
+value="255"
+onchange="speed(this.value)">
+
 <script>
-let holdTimer = null;
-let activeCmd = '';
 
-function send(cmd){
-  fetch('/action?cmd=' + encodeURIComponent(cmd))
-    .then(r => r.text())
-    .then(() => updateState())
-    .catch(() => {});
+function cmd(x){
+
+fetch("/cmd?go="+x);
+
 }
 
-function holdStart(cmd){
-  activeCmd = cmd;
-  send(cmd);
-  clearInterval(holdTimer);
-  holdTimer = setInterval(() => {
-    send(activeCmd);
-  }, 250);
+function speed(v){
+
+fetch("/speed?val="+v);
+
 }
 
-function holdStop(){
-  clearInterval(holdTimer);
-  holdTimer = null;
-  activeCmd = '';
-  send('stop');
-}
-
-document.body.addEventListener('mouseup', holdStop);
-document.body.addEventListener('touchend', holdStop);
-document.body.addEventListener('touchcancel', holdStop);
-
-function setSpeed(v){
-  fetch('/action?cmd=speed&value=' + encodeURIComponent(v))
-    .then(r => r.text())
-    .then(() => updateState())
-    .catch(() => {});
-}
-function speedLive(v){
-  document.getElementById('speedVal').innerText = v;
-}
-function setServo(v){
-  fetch('/action?cmd=servo&value=' + encodeURIComponent(v))
-    .then(r => r.text())
-    .then(() => updateState())
-    .catch(() => {});
-}
-function servoLive(v){
-  document.getElementById('servoVal').innerText = 'Servo: ' + v + '°';
-}
-function updateState(){
-  fetch('/state')
-    .then(r => r.json())
-    .then(s => {
-      document.getElementById('speedVal').innerText = s.speed;
-      document.getElementById('speed').value = s.speed;
-      document.getElementById('servoSlider').value = s.servo;
-      document.getElementById('servoVal').innerText = 'Servo: ' + s.servo + '°';
-      document.getElementById('moveBadge').innerText = 'MOVE: ' + s.move.toUpperCase();
-      document.getElementById('distBadge').innerText = 'DIST: ' + s.distance + ' cm';
-
-      let autoBtn = document.getElementById('autoBtn');
-      let servoBtn = document.getElementById('servoTestBtn');
-      document.getElementById('modeBadge').innerText = s.auto ? 'AUTO: ON' : 'AUTO: OFF';
-
-      if(s.auto) autoBtn.classList.add('on');
-      else autoBtn.classList.remove('on');
-
-      servoBtn.innerText = s.servoTest ? 'Servo Test ON' : 'Servo Test OFF';
-      servoBtn.className = s.servoTest ? 'btn green' : 'btn gray';
-    })
-    .catch(() => {});
-}
-setInterval(updateState, 1000);
-updateState();
 </script>
+
 </body>
 </html>
-)rawliteral";
+)====";
+
+return page;
+
 }
+
 
 // =====================================================
-// HTTP Handlers
+// SERVER COMMAND
 // =====================================================
-void handleRoot() {
-  server.send(200, "text/html", htmlPage());
+
+void handleCmd(){
+
+String c=server.arg("go");
+
+autoMode=false;
+
+if(c=="forward")forward();
+else if(c=="backward")backward();
+else if(c=="left")left();
+else if(c=="right")right();
+else if(c=="stop")stopCar();
+
+else if(c=="auto"){
+
+autoMode=!autoMode;
+stopCar();
+
 }
 
-void handleState() {
-  String json = "{";
-  json += "\"auto\":" + String(autoMode ? "true" : "false") + ",";
-  json += "\"servoTest\":" + String(servoTestEnabled ? "true" : "false") + ",";
-  json += "\"speed\":" + String(carSpeed) + ",";
-  json += "\"servo\":" + String(servoAngle) + ",";
-  json += "\"distance\":" + String(lastDistance) + ",";
-  json += "\"move\":\"" + currentMove + "\"";
-  json += "}";
-  server.send(200, "application/json", json);
+server.send(200,"text/plain","OK");
+
 }
 
-void handleAction() {
-  String cmd = server.arg("cmd");
-  String value = server.arg("value");
 
-  if (cmd == "forward") {
-    autoMode = false;
-    moveForward();
-  }
-  else if (cmd == "backward") {
-    autoMode = false;
-    moveBackward();
-  }
-  else if (cmd == "left") {
-    autoMode = false;
-    turnLeft();
-  }
-  else if (cmd == "right") {
-    autoMode = false;
-    turnRight();
-  }
-  else if (cmd == "stop") {
-    stopCar();
-  }
-  else if (cmd == "toggle_auto") {
-    autoMode = !autoMode;
-    stopCar();
-    servoTestEnabled = false;
-    centerServo();
-  }
-  else if (cmd == "speed") {
-    carSpeed = constrain(value.toInt(), 120, 255);
-  }
-  else if (cmd == "toggle_servo_test") {
-    if (!autoMode) {
-      servoTestEnabled = !servoTestEnabled;
-      if (!servoTestEnabled) centerServo();
-    }
-  }
-  else if (cmd == "servo") {
-    if (!autoMode && servoTestEnabled) {
-      setServoSafe(value.toInt());
-    }
-  }
+void handleSpeed(){
 
-  server.send(200, "text/plain", "OK");
+carSpeed=server.arg("val").toInt();
+server.send(200,"text/plain","OK");
+
 }
 
-void handleNotFound() {
-  server.send(404, "text/plain", "Not found");
-}
+
 
 // =====================================================
-// Setup / Loop
+// SETUP
 // =====================================================
-void setup() {
-  pinMode(IN1, OUTPUT);
-  pinMode(IN2, OUTPUT);
-  pinMode(IN3, OUTPUT);
-  pinMode(IN4, OUTPUT);
-  pinMode(ENA, OUTPUT);
-  pinMode(ENB, OUTPUT);
 
-  pinMode(FRONT_IR, INPUT);
-  pinMode(BACK_IR, INPUT);
+void setup(){
 
-  pinMode(TRIG_PIN, OUTPUT);
-  pinMode(ECHO_PIN, INPUT);
+pinMode(in1,OUTPUT);
+pinMode(in2,OUTPUT);
+pinMode(in3,OUTPUT);
+pinMode(in4,OUTPUT);
 
-  analogWriteRange(255);
-  analogWriteFreq(MOTOR_PWM_FREQ);
+pinMode(ena,OUTPUT);
+pinMode(enb,OUTPUT);
 
-  stopCar();
+pinMode(frontIR,INPUT);
+pinMode(backIR,INPUT);
 
-  myServo.attach(SERVO_PIN, 500, 2400);
-  centerServo();
-  delay(500);
+pinMode(trig,OUTPUT);
+pinMode(echo,INPUT);
 
-  WiFi.mode(WIFI_AP);
-  WiFi.softAP(ssid, password);
+analogWriteRange(255);
 
-  server.on("/", handleRoot);
-  server.on("/state", handleState);
-  server.on("/action", handleAction);
-  server.onNotFound(handleNotFound);
-  server.begin();
+// MOTOR NOISE FIX
+analogWriteFreq(15000);
 
-  lastDistance = readDistanceCM();
+
+// SERVO FIX
+myServo.attach(servoPin,500,2400);
+myServo.write(90);
+
+
+WiFi.softAP(ssid,password);
+
+
+server.on("/",[](){
+
+server.send(200,"text/html",webpage());
+
+});
+
+server.on("/cmd",handleCmd);
+server.on("/speed",handleSpeed);
+
+server.begin();
+
 }
 
-void loop() {
-  server.handleClient();
 
-  if (autoMode) {
-    autoDriving();
-  }
+
+// =====================================================
+// LOOP
+// =====================================================
+
+void loop(){
+
+server.handleClient();
+
+if(autoMode){
+
+autoDrive();
+
+}
+
 }
